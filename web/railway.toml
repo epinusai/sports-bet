@@ -2,7 +2,7 @@
 builder = "nixpacks"
 
 [build.nixpacksConfig]
-pkgs = ["python3", "gcc", "gnumake"]
+pkgs = ["python311", "gcc", "gnumake", "nodejs_20"]
 
 [deploy]
 healthcheckPath = "/api/health"
