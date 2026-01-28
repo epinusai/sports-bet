@@ -1,0 +1,14 @@
+[build]
+builder = "nixpacks"
+
+[build.nixpacksConfig]
+pkgs = ["python3", "gcc", "gnumake"]
+
+[deploy]
+healthcheckPath = "/api/health"
+healthcheckTimeout = 100
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+[deploy.env]
+NODE_ENV = "production"
