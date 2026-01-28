@@ -8,6 +8,11 @@ import { ethers } from 'ethers';
 const POLYGON_RPC = 'https://polygon-rpc.com';
 const USDT_ADDRESS = '0xc2132D05D31c914a87C6611C10748AEb04B58e8F';
 const USDT_ABI = ['function balanceOf(address) view returns (uint256)'];
+const AZURO_SUBGRAPH = 'https://thegraph.azuro.org/subgraphs/name/azuro-protocol/azuro-api-polygon-v3';
+
+// LocalStorage keys
+const WALLET_STORAGE_KEY = 'sports_bet_wallet';
+const SLIP_STORAGE_KEY = 'sports_bet_slip';
 
 // Sports store
 interface SportsState {
@@ -105,18 +110,14 @@ interface WalletState {
   getPrivateKey: () => string | null;
 }
 
-const WALLET_STORAGE_KEY = 'sports_bet_wallet';
-
 export const useWalletStore = create<WalletState>((set, get) => ({
   wallet: null,
   loading: false,
   error: null,
 
-  // Load wallet from localStorage
   fetchWallet: async () => {
     set({ loading: true, error: null });
     try {
-      // Check localStorage for saved wallet
       const stored = typeof window !== 'undefined' ? localStorage.getItem(WALLET_STORAGE_KEY) : null;
 
       if (!stored) {
@@ -130,11 +131,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         return;
       }
 
-      // Derive address and fetch balance
       const ethersWallet = new ethers.Wallet(privateKey);
       const address = ethersWallet.address;
 
-      // Fetch USDT balance
       const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
       const usdtContract = new ethers.Contract(USDT_ADDRESS, USDT_ABI, provider);
       const balance = await usdtContract.balanceOf(address);
@@ -156,11 +155,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
   },
 
-  // Connect wallet - store in localStorage only
   connectWallet: async (privateKey) => {
     set({ loading: true, error: null });
     try {
-      // Validate and derive address
       let cleanKey = privateKey.trim();
       if (!cleanKey.startsWith('0x')) {
         cleanKey = '0x' + cleanKey;
@@ -169,13 +166,11 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       const ethersWallet = new ethers.Wallet(cleanKey);
       const address = ethersWallet.address;
 
-      // Fetch USDT balance
       const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
       const usdtContract = new ethers.Contract(USDT_ADDRESS, USDT_ABI, provider);
       const balance = await usdtContract.balanceOf(address);
       const usdtBalance = ethers.formatUnits(balance, 6);
 
-      // Store in localStorage (client-side only)
       if (typeof window !== 'undefined') {
         localStorage.setItem(WALLET_STORAGE_KEY, JSON.stringify({ privateKey: cleanKey }));
       }
@@ -196,7 +191,6 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
   },
 
-  // Disconnect - remove from localStorage
   disconnectWallet: async () => {
     set({ loading: true, error: null });
     try {
@@ -209,7 +203,6 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
   },
 
-  // Refresh balance only
   refreshBalance: async () => {
     const { wallet } = get();
     if (!wallet?.connected) return;
@@ -231,7 +224,6 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
   },
 
-  // Get private key for signing (used by bet placement)
   getPrivateKey: () => {
     if (typeof window === 'undefined') return null;
     const stored = localStorage.getItem(WALLET_STORAGE_KEY);
@@ -245,9 +237,20 @@ export const useWalletStore = create<WalletState>((set, get) => ({
   },
 }));
 
-// Bet slip store
+// Bet slip store - CLIENT-SIDE ONLY (localStorage)
+interface SlipSelection {
+  id: string;
+  gameId: string;
+  gameTitle: string;
+  conditionId: string;
+  outcomeId: string;
+  outcomeName: string;
+  odds: number;
+  marketName?: string;
+}
+
 interface SlipState {
-  selections: BetSlipSelection[];
+  selections: SlipSelection[];
   totalOdds: number;
   stake: string;
   slippage: number;
@@ -256,15 +259,35 @@ interface SlipState {
   maxBet: string | null;
   maxBetError: string | null;
   maxBetLoading: boolean;
-  fetchSlip: () => Promise<void>;
-  addSelection: (selection: Omit<BetSlipSelection, 'id'>) => Promise<void>;
-  removeSelection: (conditionId: string, outcomeId: string) => Promise<void>;
-  clearSlip: () => Promise<void>;
+  fetchSlip: () => void;
+  addSelection: (selection: Omit<SlipSelection, 'id'>) => void;
+  removeSelection: (conditionId: string, outcomeId: string) => void;
+  clearSlip: () => void;
   setStake: (stake: string) => void;
   setSlippage: (slippage: number) => void;
   placeBet: () => Promise<{ success: boolean; message: string }>;
   updateSelectionOdds: (conditionId: string, outcomeId: string, newOdds: number) => void;
   fetchMaxBet: () => Promise<void>;
+}
+
+function loadSlipFromStorage(): SlipSelection[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const stored = localStorage.getItem(SLIP_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSlipToStorage(selections: SlipSelection[]) {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(SLIP_STORAGE_KEY, JSON.stringify(selections));
+}
+
+function calculateTotalOdds(selections: SlipSelection[]): number {
+  if (selections.length === 0) return 0;
+  return Math.round(selections.reduce((acc, s) => acc * s.odds, 1) * 100) / 100;
 }
 
 export const useSlipStore = create<SlipState>((set, get) => ({
@@ -278,69 +301,55 @@ export const useSlipStore = create<SlipState>((set, get) => ({
   maxBetError: null,
   maxBetLoading: false,
 
-  fetchSlip: async () => {
-    try {
-      // Use PATCH to refresh odds from API
-      const res = await fetch('/api/slip', { method: 'PATCH' });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      set({ selections: data.selections, totalOdds: data.totalOdds });
-      if (data.updatedCount > 0) {
-        console.log('[Slip] Refreshed', data.updatedCount, 'odds from API');
-      }
-    } catch (error) {
-      // Fallback to GET if PATCH fails
-      try {
-        const res = await fetch('/api/slip');
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        set({ selections: data.selections, totalOdds: data.totalOdds });
-      } catch {
-        set({ error: error instanceof Error ? error.message : 'Failed to fetch slip' });
-      }
-    }
+  fetchSlip: () => {
+    const selections = loadSlipFromStorage();
+    set({ selections, totalOdds: calculateTotalOdds(selections) });
   },
 
-  addSelection: async (selection) => {
-    set({ loading: true, error: null });
-    try {
-      const res = await fetch('/api/slip', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(selection),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      set({ selections: data.selections, totalOdds: data.totalOdds, loading: false });
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : 'Failed to add selection', loading: false });
+  addSelection: (selection) => {
+    const { selections } = get();
+
+    // Check if already exists
+    const exists = selections.some(
+      s => s.conditionId === selection.conditionId && s.outcomeId === selection.outcomeId
+    );
+    if (exists) return;
+
+    // Check if same condition but different outcome (replace)
+    const sameCondition = selections.find(s => s.conditionId === selection.conditionId);
+    let newSelections: SlipSelection[];
+
+    if (sameCondition) {
+      // Replace the outcome for this condition
+      newSelections = selections.map(s =>
+        s.conditionId === selection.conditionId
+          ? { ...selection, id: `${selection.conditionId}-${selection.outcomeId}` }
+          : s
+      );
+    } else {
+      // Add new selection
+      newSelections = [
+        ...selections,
+        { ...selection, id: `${selection.conditionId}-${selection.outcomeId}` }
+      ];
     }
+
+    saveSlipToStorage(newSelections);
+    set({ selections: newSelections, totalOdds: calculateTotalOdds(newSelections) });
   },
 
-  removeSelection: async (conditionId, outcomeId) => {
-    set({ loading: true, error: null });
-    try {
-      const res = await fetch(`/api/slip?conditionId=${conditionId}&outcomeId=${outcomeId}`, {
-        method: 'DELETE',
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      set({ selections: data.selections, totalOdds: data.totalOdds, loading: false });
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : 'Failed to remove selection', loading: false });
-    }
+  removeSelection: (conditionId, outcomeId) => {
+    const { selections } = get();
+    const newSelections = selections.filter(
+      s => !(s.conditionId === conditionId && s.outcomeId === outcomeId)
+    );
+    saveSlipToStorage(newSelections);
+    set({ selections: newSelections, totalOdds: calculateTotalOdds(newSelections), maxBet: null, maxBetError: null });
   },
 
-  clearSlip: async () => {
-    set({ loading: true, error: null });
-    try {
-      const res = await fetch('/api/slip?clearAll=true', { method: 'DELETE' });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      set({ selections: [], totalOdds: 0, stake: '', maxBet: null, maxBetError: null, loading: false });
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : 'Failed to clear slip', loading: false });
-    }
+  clearSlip: () => {
+    saveSlipToStorage([]);
+    set({ selections: [], totalOdds: 0, stake: '', maxBet: null, maxBetError: null });
   },
 
   setStake: (stake) => set({ stake }),
@@ -356,7 +365,6 @@ export const useSlipStore = create<SlipState>((set, get) => ({
       return { success: false, message: 'Bet slip is empty' };
     }
 
-    // Get private key from localStorage
     const privateKey = useWalletStore.getState().getPrivateKey();
     if (!privateKey) {
       return { success: false, message: 'Wallet not connected' };
@@ -364,7 +372,6 @@ export const useSlipStore = create<SlipState>((set, get) => ({
 
     set({ loading: true, error: null });
     try {
-      // Create abort controller for timeout (2 minutes for blockchain tx)
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 120000);
 
@@ -372,7 +379,20 @@ export const useSlipStore = create<SlipState>((set, get) => ({
       const res = await fetch('/api/bet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: stake, slippage, privateKey }),
+        body: JSON.stringify({
+          amount: stake,
+          slippage,
+          privateKey,
+          selections: selections.map(s => ({
+            conditionId: s.conditionId,
+            outcomeId: s.outcomeId,
+            odds: s.odds,
+            gameId: s.gameId,
+            gameTitle: s.gameTitle,
+            outcomeName: s.outcomeName,
+            marketName: s.marketName,
+          }))
+        }),
         signal: controller.signal,
       });
 
@@ -384,10 +404,10 @@ export const useSlipStore = create<SlipState>((set, get) => ({
 
       if (data.error) throw new Error(data.error);
 
-      // Clear slip on success
       if (data.success) {
+        // Clear slip on success
+        saveSlipToStorage([]);
         set({ selections: [], totalOdds: 0, stake: '', loading: false });
-        // Refresh wallet balance
         useWalletStore.getState().refreshBalance();
       } else {
         set({ loading: false });
@@ -409,24 +429,18 @@ export const useSlipStore = create<SlipState>((set, get) => ({
     }
   },
 
-  // Update odds for a selection locally (from WebSocket)
   updateSelectionOdds: (conditionId, outcomeId, newOdds) => {
-    set((state) => {
-      const updatedSelections = state.selections.map((s) => {
-        if (s.conditionId === conditionId && s.outcomeId === outcomeId) {
-          return { ...s, odds: newOdds };
-        }
-        return s;
-      });
-      const totalOdds = updatedSelections.reduce((acc, s) => acc * s.odds, 1);
-      return {
-        selections: updatedSelections,
-        totalOdds: Math.round(totalOdds * 100) / 100,
-      };
+    const { selections } = get();
+    const newSelections = selections.map(s => {
+      if (s.conditionId === conditionId && s.outcomeId === outcomeId) {
+        return { ...s, odds: newOdds };
+      }
+      return s;
     });
+    saveSlipToStorage(newSelections);
+    set({ selections: newSelections, totalOdds: calculateTotalOdds(newSelections) });
   },
 
-  // Fetch max bet from Azuro API
   fetchMaxBet: async () => {
     const { selections } = get();
     if (selections.length === 0) {
@@ -450,7 +464,6 @@ export const useSlipStore = create<SlipState>((set, get) => ({
       const data = await res.json();
       if (data.error) {
         console.error('[MaxBet] Error:', data.error);
-        // Show user-friendly error message
         let errorMsg = data.error;
         if (errorMsg.includes('duplicate games')) {
           errorMsg = 'Same game combo not allowed';
@@ -461,7 +474,6 @@ export const useSlipStore = create<SlipState>((set, get) => ({
         return;
       }
 
-      // Round max bet to 2 decimal places
       const maxBet = parseFloat(data.maxBet).toFixed(2);
       console.log('[MaxBet] Fetched max bet:', maxBet);
       set({ maxBet, maxBetError: null, maxBetLoading: false });
@@ -511,25 +523,27 @@ export const useOddsStore = create<OddsState>((set, get) => ({
   },
 }));
 
-// History store
-interface HistoryState {
-  bets: Array<{
-    id: number;
-    betId: string | null;
-    txHash: string | null;
-    gameId: string;
-    gameTitle: string;
-    conditionId: string;
+// History store - Fetches from Azuro subgraph by wallet address
+interface HistoryBet {
+  id: string;
+  betId: string;
+  txHash: string;
+  amount: number;
+  odds: number;
+  potentialPayout: number;
+  status: string;
+  result: string | null;
+  payout: number | null;
+  createdAt: string;
+  isCombo: boolean;
+  selections: Array<{
     outcomeId: string;
-    outcomeName: string;
-    odds: number;
-    amount: number;
-    potentialPayout: number;
-    status: string;
-    result: string | null;
-    payout: number | null;
-    placedAt: string;
+    conditionId: string;
   }>;
+}
+
+interface HistoryState {
+  bets: HistoryBet[];
   stats: {
     totalBets: number;
     totalStaked: number;
@@ -565,18 +579,126 @@ export const useHistoryStore = create<HistoryState>((set) => ({
   fetchHistory: async () => {
     set({ loading: true, error: null });
     try {
-      // Get wallet address from localStorage
       const wallet = useWalletStore.getState().wallet;
       if (!wallet?.address) {
         set({ bets: [], loading: false });
         return;
       }
 
-      const res = await fetch(`/api/bets?address=${wallet.address}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      set({ bets: data.bets, stats: data.stats, loading: false });
+      const addr = wallet.address.toLowerCase();
+
+      // Query Azuro V3 subgraph for bets
+      const query = `{
+        v3Bets(
+          first: 100,
+          where: { actor: "${addr}" },
+          orderBy: createdBlockTimestamp,
+          orderDirection: desc
+        ) {
+          id
+          betId
+          amount
+          odds
+          status
+          result
+          payout
+          potentialPayout
+          createdTxHash
+          createdBlockTimestamp
+          selections {
+            outcome {
+              outcomeId
+              condition {
+                conditionId
+              }
+            }
+          }
+        }
+      }`;
+
+      const response = await fetch(AZURO_SUBGRAPH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+      });
+
+      const data = await response.json();
+
+      if (data.errors) {
+        throw new Error(data.errors[0]?.message || 'GraphQL error');
+      }
+
+      const azuroBets = data.data?.v3Bets || [];
+
+      // Transform to our format
+      const bets: HistoryBet[] = azuroBets.map((bet: {
+        id: string;
+        betId: string;
+        amount: string;
+        odds: string;
+        status: string;
+        result: string | null;
+        payout: string | null;
+        potentialPayout: string;
+        createdTxHash: string;
+        createdBlockTimestamp: string;
+        selections: Array<{ outcome: { outcomeId: string; condition: { conditionId: string } } }>;
+      }) => ({
+        id: bet.id,
+        betId: bet.betId,
+        txHash: bet.createdTxHash,
+        amount: parseFloat(bet.amount),
+        odds: parseFloat(bet.odds),
+        potentialPayout: parseFloat(bet.potentialPayout),
+        status: bet.status.toLowerCase(),
+        result: bet.result ? bet.result.toLowerCase() : null,
+        payout: bet.payout ? parseFloat(bet.payout) : null,
+        createdAt: new Date(parseInt(bet.createdBlockTimestamp) * 1000).toISOString(),
+        isCombo: bet.selections.length > 1,
+        selections: bet.selections.map((s: { outcome: { outcomeId: string; condition: { conditionId: string } } }) => ({
+          outcomeId: s.outcome.outcomeId,
+          conditionId: s.outcome.condition.conditionId,
+        })),
+      }));
+
+      // Calculate stats
+      let totalStaked = 0;
+      let totalWon = 0;
+      let totalLost = 0;
+      let pendingCount = 0;
+      let wonCount = 0;
+      let lostCount = 0;
+
+      for (const bet of bets) {
+        totalStaked += bet.amount;
+        if (bet.status === 'resolved') {
+          if (bet.result === 'won') {
+            wonCount++;
+            totalWon += bet.payout || 0;
+          } else if (bet.result === 'lost') {
+            lostCount++;
+            totalLost += bet.amount;
+          }
+        } else if (bet.status === 'accepted') {
+          pendingCount++;
+        }
+      }
+
+      const stats = {
+        totalBets: bets.length,
+        totalStaked,
+        totalWon,
+        totalLost,
+        netPL: totalWon - totalLost,
+        pendingCount,
+        wonCount,
+        lostCount,
+        winRate: wonCount + lostCount > 0 ? (wonCount / (wonCount + lostCount)) * 100 : 0,
+      };
+
+      set({ bets, stats, loading: false });
     } catch (error) {
+      console.error('[History] Error fetching:', error);
       set({ error: error instanceof Error ? error.message : 'Failed to fetch history', loading: false });
     }
   },

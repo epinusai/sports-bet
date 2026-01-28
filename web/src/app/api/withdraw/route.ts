@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getWallet, updateBetStatus } from '@/lib/db';
-import { loadWallet, isWalletConnected, withdrawPayout, cancelPendingTransactions } from '@/lib/betting';
+import { loadWallet, withdrawPayout, cancelPendingTransactions } from '@/lib/betting';
 import { getChainConfig } from '@/lib/config';
 
 // POST - Withdraw payout for a won bet OR cancel pending transactions
@@ -9,19 +8,17 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     console.log('[Withdraw] Request body:', JSON.stringify(body));
-    const { betId, action, force } = body;
+    const { betId, action, force, privateKey } = body;
+
+    if (!privateKey) {
+      return NextResponse.json({ error: 'Wallet not connected' }, { status: 400 });
+    }
+
+    // Load wallet from provided private key
+    loadWallet(privateKey);
 
     // Handle cancel pending transactions action
     if (action === 'cancel-pending') {
-      const storedWallet = getWallet();
-      if (!storedWallet?.private_key) {
-        return NextResponse.json({ error: 'Wallet not connected' }, { status: 400 });
-      }
-
-      if (!isWalletConnected()) {
-        loadWallet(storedWallet.private_key);
-      }
-
       console.log('[Withdraw] Cancelling pending transactions...');
       const result = await cancelPendingTransactions();
 
@@ -48,21 +45,6 @@ export async function POST(request: NextRequest) {
 
     console.log('[Withdraw] Processing betIds:', betIds);
 
-    // Get stored wallet
-    const storedWallet = getWallet();
-    if (!storedWallet?.private_key) {
-      return NextResponse.json(
-        { error: 'Wallet not connected' },
-        { status: 400 }
-      );
-    }
-
-    // Load wallet if not loaded
-    if (!isWalletConnected()) {
-      console.log('[Withdraw] Loading wallet...');
-      loadWallet(storedWallet.private_key);
-    }
-
     const forceHighGas = force === true;
     console.log('[Withdraw] Wallet loaded, calling withdrawPayout for betIds:', betIds, forceHighGas ? '(FORCE MODE)' : '');
 
@@ -80,7 +62,6 @@ export async function POST(request: NextRequest) {
         console.error(`[Withdraw] Attempt ${attempt + 1} failed:`, err);
         if (attempt < 2) {
           console.log('[Withdraw] Waiting 2 seconds before retry...');
-          // Wait before retry
           await new Promise(r => setTimeout(r, 2000));
         }
       }
@@ -88,11 +69,6 @@ export async function POST(request: NextRequest) {
 
     if (!result) {
       throw lastError || new Error('Withdrawal failed');
-    }
-
-    // Update bet status in local database for all betIds
-    for (const id of betIds) {
-      updateBetStatus(id, 'redeemed', 'won', parseFloat(result.payout) / betIds.length || 0);
     }
 
     return NextResponse.json({
@@ -121,21 +97,20 @@ interface RedeemableBet {
 }
 
 // GET - Check redeemable bets
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
   try {
-    const storedWallet = getWallet();
-    if (!storedWallet?.address) {
-      console.log('[Withdraw] No wallet connected');
+    // Get wallet address from header
+    const walletAddress = request.headers.get('x-wallet-address');
+    if (!walletAddress) {
+      console.log('[Withdraw] No wallet address provided');
       return NextResponse.json({ redeemable: [] });
     }
 
     const config = getChainConfig();
-    const addr = storedWallet.address.toLowerCase();
+    const addr = walletAddress.toLowerCase();
     console.log('[Withdraw] Checking redeemable bets for:', addr);
 
     // Query redeemable bets from Azuro V3 API
-    // Note: V3 schema uses different field structure
     const query = `{
       v3Bets(first: 50, where: { actor: "${addr}", status: Resolved, result: Won, isRedeemed: false }) {
         betId
