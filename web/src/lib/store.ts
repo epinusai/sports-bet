@@ -1,7 +1,7 @@
 'use client';
 
 import { create } from 'zustand';
-import { Sport, Game, WalletInfo, BetSlipSelection, OddsUpdate, LiveGameData } from './types';
+import { Sport, Game, WalletInfo, OddsUpdate, LiveGameData } from './types';
 import { ethers } from 'ethers';
 
 // Constants
