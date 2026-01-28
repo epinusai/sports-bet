@@ -12,3 +12,4 @@ restartPolicyMaxRetries = 3
 
 [deploy.env]
 NODE_ENV = "production"
+RAILWAY_VOLUME_MOUNT_PATH = "/data"

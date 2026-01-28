@@ -1,7 +1,15 @@
 import Database from 'better-sqlite3';
 import path from 'path';
+import fs from 'fs';
 
-const DB_PATH = path.join(process.cwd(), 'data', 'azuro.db');
+// Use RAILWAY_VOLUME_MOUNT_PATH if available, otherwise fallback to local data folder
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(process.cwd(), 'data');
+const DB_PATH = path.join(DATA_DIR, 'azuro.db');
+
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
 
 let db: Database.Database | null = null;
 
