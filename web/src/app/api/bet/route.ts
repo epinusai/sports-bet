@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getWallet, saveBet, clearSlip, getSlipSelections, removeSlipSelection } from '@/lib/db';
+import { saveBet, clearSlip, getSlipSelections, removeSlipSelection } from '@/lib/db';
 import {
   loadWallet,
   placeBet,
@@ -7,7 +7,6 @@ import {
   approveToken,
   checkAllowance,
   checkBalances,
-  isWalletConnected,
   forceSwitchRpc,
 } from '@/lib/betting';
 import { getChainConfig } from '@/lib/config';
@@ -70,7 +69,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { amount, slippage } = body;
+    const { amount, slippage, privateKey } = body;
     console.log('[BetAPI] Amount:', amount, 'Slippage:', slippage);
 
     if (!amount || parseFloat(amount) <= 0) {
@@ -80,20 +79,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get stored wallet
-    const storedWallet = getWallet();
-    if (!storedWallet?.private_key) {
+    // Get private key from request (client sends it for each bet)
+    if (!privateKey) {
       return NextResponse.json(
         { error: 'Wallet not connected' },
         { status: 400 }
       );
     }
 
-    // Load wallet if not loaded
-    if (!isWalletConnected()) {
-      console.log('[BetAPI] Loading wallet...');
-      loadWallet(storedWallet.private_key);
-    }
+    // Load wallet from provided private key
+    console.log('[BetAPI] Loading wallet from request...');
+    loadWallet(privateKey);
 
     // Switch to fresh RPC to avoid stale mempool data
     console.log('[BetAPI] Switching to fresh RPC...');

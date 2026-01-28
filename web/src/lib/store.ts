@@ -2,6 +2,12 @@
 
 import { create } from 'zustand';
 import { Sport, Game, WalletInfo, BetSlipSelection, OddsUpdate, LiveGameData } from './types';
+import { ethers } from 'ethers';
+
+// Constants
+const POLYGON_RPC = 'https://polygon-rpc.com';
+const USDT_ADDRESS = '0xc2132D05D31c914a87C6611C10748AEb04B58e8F';
+const USDT_ABI = ['function balanceOf(address) view returns (uint256)'];
 
 // Sports store
 interface SportsState {
@@ -87,7 +93,7 @@ export const useGamesStore = create<GamesState>((set) => ({
   },
 }));
 
-// Wallet store
+// Wallet store - CLIENT-SIDE ONLY (localStorage)
 interface WalletState {
   wallet: WalletInfo | null;
   loading: boolean;
@@ -95,48 +101,146 @@ interface WalletState {
   fetchWallet: () => Promise<void>;
   connectWallet: (privateKey: string) => Promise<void>;
   disconnectWallet: () => Promise<void>;
+  refreshBalance: () => Promise<void>;
+  getPrivateKey: () => string | null;
 }
 
-export const useWalletStore = create<WalletState>((set) => ({
+const WALLET_STORAGE_KEY = 'sports_bet_wallet';
+
+export const useWalletStore = create<WalletState>((set, get) => ({
   wallet: null,
   loading: false,
   error: null,
 
+  // Load wallet from localStorage
   fetchWallet: async () => {
     set({ loading: true, error: null });
     try {
-      const res = await fetch('/api/wallet');
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      set({ wallet: data.connected ? data : null, loading: false });
+      // Check localStorage for saved wallet
+      const stored = typeof window !== 'undefined' ? localStorage.getItem(WALLET_STORAGE_KEY) : null;
+
+      if (!stored) {
+        set({ wallet: null, loading: false });
+        return;
+      }
+
+      const { privateKey } = JSON.parse(stored);
+      if (!privateKey) {
+        set({ wallet: null, loading: false });
+        return;
+      }
+
+      // Derive address and fetch balance
+      const ethersWallet = new ethers.Wallet(privateKey);
+      const address = ethersWallet.address;
+
+      // Fetch USDT balance
+      const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+      const usdtContract = new ethers.Contract(USDT_ADDRESS, USDT_ABI, provider);
+      const balance = await usdtContract.balanceOf(address);
+      const usdtBalance = ethers.formatUnits(balance, 6);
+
+      set({
+        wallet: {
+          connected: true,
+          address,
+          usdtBalance,
+          chain: 'polygon',
+          tokenSymbol: 'USDT',
+        },
+        loading: false,
+      });
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : 'Failed to fetch wallet', loading: false });
+      console.error('[Wallet] Error loading wallet:', error);
+      set({ error: error instanceof Error ? error.message : 'Failed to load wallet', loading: false });
     }
   },
 
+  // Connect wallet - store in localStorage only
   connectWallet: async (privateKey) => {
     set({ loading: true, error: null });
     try {
-      const res = await fetch('/api/wallet', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ privateKey }),
+      // Validate and derive address
+      let cleanKey = privateKey.trim();
+      if (!cleanKey.startsWith('0x')) {
+        cleanKey = '0x' + cleanKey;
+      }
+
+      const ethersWallet = new ethers.Wallet(cleanKey);
+      const address = ethersWallet.address;
+
+      // Fetch USDT balance
+      const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+      const usdtContract = new ethers.Contract(USDT_ADDRESS, USDT_ABI, provider);
+      const balance = await usdtContract.balanceOf(address);
+      const usdtBalance = ethers.formatUnits(balance, 6);
+
+      // Store in localStorage (client-side only)
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(WALLET_STORAGE_KEY, JSON.stringify({ privateKey: cleanKey }));
+      }
+
+      set({
+        wallet: {
+          connected: true,
+          address,
+          usdtBalance,
+          chain: 'polygon',
+          tokenSymbol: 'USDT',
+        },
+        loading: false,
       });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      set({ wallet: data, loading: false });
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : 'Failed to connect wallet', loading: false });
+      console.error('[Wallet] Error connecting:', error);
+      set({ error: error instanceof Error ? error.message : 'Invalid private key', loading: false });
     }
   },
 
+  // Disconnect - remove from localStorage
   disconnectWallet: async () => {
     set({ loading: true, error: null });
     try {
-      await fetch('/api/wallet', { method: 'DELETE' });
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem(WALLET_STORAGE_KEY);
+      }
       set({ wallet: null, loading: false });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : 'Failed to disconnect', loading: false });
+    }
+  },
+
+  // Refresh balance only
+  refreshBalance: async () => {
+    const { wallet } = get();
+    if (!wallet?.connected) return;
+
+    try {
+      const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+      const usdtContract = new ethers.Contract(USDT_ADDRESS, USDT_ABI, provider);
+      const balance = await usdtContract.balanceOf(wallet.address);
+      const usdtBalance = ethers.formatUnits(balance, 6);
+
+      set({
+        wallet: {
+          ...wallet,
+          usdtBalance,
+        },
+      });
+    } catch (error) {
+      console.error('[Wallet] Error refreshing balance:', error);
+    }
+  },
+
+  // Get private key for signing (used by bet placement)
+  getPrivateKey: () => {
+    if (typeof window === 'undefined') return null;
+    const stored = localStorage.getItem(WALLET_STORAGE_KEY);
+    if (!stored) return null;
+    try {
+      const { privateKey } = JSON.parse(stored);
+      return privateKey || null;
+    } catch {
+      return null;
     }
   },
 }));
@@ -252,6 +356,12 @@ export const useSlipStore = create<SlipState>((set, get) => ({
       return { success: false, message: 'Bet slip is empty' };
     }
 
+    // Get private key from localStorage
+    const privateKey = useWalletStore.getState().getPrivateKey();
+    if (!privateKey) {
+      return { success: false, message: 'Wallet not connected' };
+    }
+
     set({ loading: true, error: null });
     try {
       // Create abort controller for timeout (2 minutes for blockchain tx)
@@ -262,7 +372,7 @@ export const useSlipStore = create<SlipState>((set, get) => ({
       const res = await fetch('/api/bet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: stake, slippage }),
+        body: JSON.stringify({ amount: stake, slippage, privateKey }),
         signal: controller.signal,
       });
 
@@ -277,6 +387,8 @@ export const useSlipStore = create<SlipState>((set, get) => ({
       // Clear slip on success
       if (data.success) {
         set({ selections: [], totalOdds: 0, stake: '', loading: false });
+        // Refresh wallet balance
+        useWalletStore.getState().refreshBalance();
       } else {
         set({ loading: false });
       }
@@ -453,7 +565,14 @@ export const useHistoryStore = create<HistoryState>((set) => ({
   fetchHistory: async () => {
     set({ loading: true, error: null });
     try {
-      const res = await fetch('/api/bets');
+      // Get wallet address from localStorage
+      const wallet = useWalletStore.getState().wallet;
+      if (!wallet?.address) {
+        set({ bets: [], loading: false });
+        return;
+      }
+
+      const res = await fetch(`/api/bets?address=${wallet.address}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       set({ bets: data.bets, stats: data.stats, loading: false });
